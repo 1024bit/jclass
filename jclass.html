@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+		<script type="text/javascript" src="http://code.jquery.com/jquery-1.11.0.js"></script>
+    </head>
+    <body>
+		<script type="text/javascript">
+		/** 
+         *  背景: JavaScript作为一门语言, 其安全性从未得到重视
+     	 *  1) 目前的多例大都未利用js的原型继承原理, 造成内存浪费
+     	 *  2) 采用js原型继承构造的多例与外界交互性太强, 安全性存在问题
+		 *  目的:
+		 *  1) 开发者无需改变编码方式 
+		 *  功能:
+		 *  支持传统强类型语言以下特性:
+		 *  private, protected, static, super
+		 *  知识点:
+		 *  1) 父类中不能访问子类私有属性
+		 *  2) 调用父类方法所增加的父类同名私有属性, 以父类为单位维护一个闭包
+		 *  3) 调用父类方法永远不会影响(增, 删, 改)父类的属性 (因为this指向子类)
+		 *  4) 调用父类方法, 退出时应过滤父类私有属性
+		 *  使用方法:
+		 *  jClass(name, klass, base, proto, dynamic), jClass(name, klass, proto), jClass(name, klass, proto, dynamic), jClass(name, klass, dynamic), jClass(klass, proto), jClass(klass, proto, dynamic), jClass(klass, dynamic)
+		 *  TODO:
+		 *  多态支持
+		 **/
+		function jClass(name, klass, base, proto, dynamic) {
+			var 
+			callee = arguments.callee, 
+            instances = [], 
+            expando = callee.expando, 
+            uuid = 0, 
+            //pass, 
+            _klass, 
+            _class, 
+			__members__ = {
+                __store__: function() {}, 
+                __restore__: function() {}
+            }, 
+			_static = __members__, 
+			_base = __members__, 
+			// 宿主
+			host = (1, eval)(this) || this, 
+			hasStatic = false;	
+						
+			// 可变参数
+			if ($.type(name) === 'function') {
+				dynamic = proto;
+				proto = base;
+				base = klass;
+				klass = name;
+				name = undefined;
+			}
+			if ((name === undefined && arguments.length >= 2) || arguments.length >= 3) {
+				if ($.type(base) === 'object') {
+					if (base[expando] == undefined) {
+						dynamic = proto;
+						proto = base;
+						base = undefined;
+					} else {
+						_base = base;
+					}
+				} else if ($.type(proto) === 'boolean') {
+					dynamic = proto;
+					proto = {};
+				} else if ($.type(base) === 'boolean') {
+					dynamic = base;
+					proto = {};
+					base = undefined;
+				}
+			}
+
+			_class = klass;				
+			
+            if ($.isFunction(base)) {
+                if ((base[expando] == undefined)) {
+                    base = callee(base);
+                }
+                _base = base.apply(host);    
+            } 
+			
+			/** 
+             *  维持原型链需注意:
+			 *  1) 外界可通过操作原型链上的任一对象间接影响内部值
+			 *  2) 速度会更慢(通过原型链寻值), 内存消耗更多(需要维护原型链表)
+			 **/
+            klass.prototype = $.extend({}, klass.prototype, proto, true);
+			// 原型方法
+			$.each(klass.prototype, function(name, prop) {
+				_override(name, prop, klass.prototype);
+			});
+			
+			// constructor
+            function _construct() {
+                var 
+                self = this, 
+                args = arguments[0];
+                
+                _class.apply(this, args);
+            };
+
+			function _proto() {
+                // 深度拷贝proto, 防止外界操作影响内部值
+				$.extend(this, klass.prototype);
+            };
+			_proto.prototype = _base;
+            _construct.prototype = new _proto();
+			
+			// static支持			
+            function _statik() {
+				var obj = new _class();
+				// 获取klass静态属性, 深度拷贝
+				$.extend(this, _class, obj.static || {}, true);
+			}
+			hasStatic = !$.isEmptyObject(new _statik()) || !$.isEmptyObject(_base.static);
+			hasStatic  && (_static = callee(_statik, _base.static).apply(host));
+			
+            // 默认只对外开放公有成员
+            _klass = function() {
+                var 
+                that,                 
+                // 闭包
+                _super = {}, 
+                // that-private成员集
+                _members = {},
+                // that-protected成员集
+                __members = {}, 
+				// 调用父类方法时存储的父类私有属性
+                _diffs = {};
+
+                that = new _construct([].slice.apply(arguments));
+
+                // super支持; 遵循PHP风格(只支持method)
+                $.each(_base, function(name) {
+                    if ($.isFunction(this)) {
+                        _super[name] = function() {
+                            var rtr, _super = that.super;
+                            that.super = _base.super;
+                            rtr = _base[name].apply(that, [].slice.call(arguments, 0));
+                            that.super = _super;
+                            return rtr;
+                        }
+                    }
+                });
+                that.super = _super;
+                that.super.construct = function() {
+                    return base.apply(that, arguments);
+                };   
+
+				// static支持
+				that.static = _static;
+				// 曝露公有静态成员
+				// $.extend(_klass, _static); // 做不到同步
+				
+                // 隐藏类private, protected成员
+                $.each(that, function(name, prop) {
+					_override(name, prop, that);
+                    // 隐藏
+                    _backup.call(that, name);
+                });
+
+				that.__store__ = __store__;
+				that.__restore__ = __restore__;
+
+				instances[uuid] = that;
+                that[expando] = uuid++;
+
+                return that;
+				
+				// @ptdOnly: protected member only
+                function _backup(name, ptdOnly, pvtOnly, ancestor) {
+					var context = this, id, pvt, store;
+                    if ((name.charAt(0) === '_') && context.hasOwnProperty(name)) {
+						// @pvt: private member
+						pvt = (name.charAt(1) !== '_');
+						if ((ptdOnly && pvt) || (pvtOnly && !pvt)) return;
+						if (!pvt && (name.slice(-2) === '__')) return;
+						
+						if (pvt) {
+							if (ancestor) {
+								// 获取父类ID
+								id = callee.getInstanceId(ancestor);
+								_diffs[id] = _diffs[id] || {};
+								store = _diffs[id];
+							} else {
+								store = _members;
+							} 							
+						} else {
+							store = __members;
+						}
+                        
+						/* 
+						// 父类与子类中存在同名私有属性
+						if (ancestor && ((ancestor[name] != undefined) && _members[name])) {
+							return;
+						}
+						*/
+						store[name] = context[name];
+						delete context[name];
+                    }       
+                };
+				
+                // 类保留方法
+                // 隐藏protected成员
+				// 备份                
+                function __store__(ptdOnly, pvtOnly, ancestor, son) {
+					var context = this, caller = arguments.callee.caller;
+					if (son && (caller !== son.__store__) || (!son && (caller !== callee.override))) {
+						callee.log();
+						return;
+					}
+					
+					if (ancestor) {
+						// 存储上一级原型链对象私有属性, 对应ancestor.__restore__操作
+						ancestor.__store__(false, true, undefined, this);
+					}
+                    $.each(context, function(name) {
+                        _backup.apply(context, [].concat(name, ptdOnly, pvtOnly, ancestor));
+                    });
+					
+                    _base.__store__(true, undefined, undefined, this);				
+                }
+				
+                // 曝露protected成员
+				// 还原
+                function __restore__(ptdOnly, pvtOnly, ancestor, son) {
+					var store, context = this, id, caller = arguments.callee.caller;
+					if (son && (caller !== son.__restore__) || (!son && (caller !== callee.override))) {
+						callee.log();
+						return;
+					}
+										
+					if (ancestor) {
+						// 调用原型链对象方法, 只能访问context非私有属性
+						ptdOnly = true;	// 暂时没有使用				
+						
+						// 获取父类ID
+						id = callee.getInstanceId(ancestor);
+						
+						// 还原上一级原型链对象私有属性
+						ancestor.__restore__(false, true, undefined, this);
+						// 打造由protected, public, closure构成的this对象
+						_diffs[id] = _diffs[id] || {};
+						
+						store = $.extend({}, __members, _diffs[id]);
+					} else {
+						store = ptdOnly ? __members : (pvtOnly ? _members : $.extend({}, _members, __members));
+					}
+
+                    $.each(store, function(name) {
+						context[name] = store[name];
+                    }); 
+					
+                    _base.__restore__(true, undefined, undefined, this);
+                }			
+            };
+
+            
+            // 标识动态类
+            if (dynamic) {
+                _klass.prototype = _construct.prototype;
+            }
+
+            // 针对多例提供实例管理, 可基于此扩展管理工具
+            _klass['instances'] = instances;
+            
+			callee['instances'][callee.uuid] = _klass;
+			_klass[expando] = (callee.uuid)++;
+            
+            return name ? (host[name] = _klass) : _klass;
+			
+			// 重写方法
+			function _override(name, prop, context) {
+				if ($.isFunction(prop) && context.hasOwnProperty(name)) {
+					context[name] = function() {
+						var args = [].slice.call(arguments, 0);
+						return callee.override.apply(this, [prop, context, args]);
+					}
+				} 
+			}			
+        }	
+		$.extend(jClass, {
+			uuid : 0, 
+			expando: $.expando || ('jClass' + (+new Date())), 
+			instances: [], 
+			log: function(msg) {
+				if (window.console) {
+					console.log(msg || '[native code]');
+				}          
+			}, 
+			// 获取实例ID		
+			getInstanceId: function(instance) {
+				var id;
+				// 获取父类ID
+				$.each(jClass['instances'], function(cid, cls) {
+					$.each(cls, function(oid, obj) {
+						if (instance === obj) {
+							id = '' + cid + '' + oid;
+							return false;
+						}
+					})
+				});
+				return id;				
+			}, 
+			// 重写实例方法
+			override: function(prop, that, args) {
+				var result, ancestor;
+				// ((this != that) && jClass.getInstanceId(that)) && (ancestor = that);
+				((this != that) && (that[jClass.expando] != undefined)) && (ancestor = that);
+				
+				this.static.__restore__(false, false, ancestor && ancestor.static);
+				this.__restore__(false, false, ancestor);
+				
+				result = prop.apply(this, args);
+				
+				this.static.__store__(false, false, ancestor && ancestor.static);
+				this.__store__(false, false, ancestor);
+
+				return result;								
+			} 			
+		});
+		function A() {
+			this._private = 'private';
+			this.__protected = 'protected';
+			this.public = 'public';
+			this.fun = function(ok) {
+				this._private = ok;
+			};
+			this.hello = function() {
+				console.log(this._private);
+				console.log(this.__bpro);
+			}
+		}
+		A._privateStatic = 'private static';
+		A.__protectedStatic = 'protected static';
+		A.publicStatic = 'public static';
+		function B() {
+			this.__bpro = 'bpro';
+			this.xxx = 'xxx';
+			this.test = function(ok) {
+				if (ok) {
+					this.fun(ok);
+				}
+				this.super.hello();
+				this.hello();
+				
+				console.log(this._private);
+			}, 
+			this.test2 = function() {
+				this.static.publicStatic = 'xxx';
+				console.log(this.static.__protectedStatic);
+				console.log(this.static._privateStatic);
+			}
+			
+			
+		}
+		var C = jClass(B, A, {ok: function() {
+			console.log('I am ok');
+		}});
+		var obj1 = new C();
+		var obj2 = new C();
+		// obj1.test2();
+		obj1.test('php');
+		console.log(obj1.constructor)
+		// console.log(obj2.static.publicStatic);
+		// console.log(obj1.static.__protectedStatic);
+		// obj1.static.__restore__();
+		</script>
+		
+    </body>
+</html>
